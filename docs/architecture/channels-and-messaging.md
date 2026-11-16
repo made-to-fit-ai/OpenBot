@@ -35,7 +35,10 @@ The desktop and the web client notify about the same events (`agentEventCanNotif
 decide as one: `notificationForAgentEvent` in `@openbot/team-client` applies the level of the server
 (`all`, or `needs-me` for the events that wait for the user), or the member's own level of the agent
 (`agent-notification-levels-v1`, see [servers](servers.md)), the switch of the agent, and the quiet
-routine runs. The desktop and the web client close the notification of a request when an
+routine runs. A completed turn whose messages are all requests from other agents that wait for an
+answer does not notify (`answersAgent`): its result goes to the agent that asked, and that agent's
+answer notifies. A question, an approval or an error in such a turn still notifies. Only the host's
+own desktop app and phones get the field, so a web client or another computer still notifies. The desktop and the web client close the notification of a request when an
 `agent-input-resolved` or `browser-takeover-resolved` event comes, also for an answer from another
 device. The title is the agent name. When the phone shows previews, the text is the
 preview of a desktop notification: the lead of the answer of that turn, the question, or the action

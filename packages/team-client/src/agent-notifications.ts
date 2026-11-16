@@ -228,8 +228,9 @@ function notificationSubject(
   if (event.type === "error" && event.agentId && agentEventCanNotify(event))
     return { body: translate("notification.failed"), agentId: event.agentId, threadId: null };
   // A quiet routine run posted nothing, so there is nothing to look at. A turn that continues its
-  // plan is not the end of the request.
+  // plan is not the end of the request. A completed answer to another agent goes to that agent.
   if (event.type !== "turn-completed" || event.quiet || event.continues) return null;
+  if (event.status === "completed" && event.answersAgent) return null;
   const { agentId, threadId } = event;
   if (event.status === "completed") {
     // Redact before the cut and the Markdown change the shape of a secret.

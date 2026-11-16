@@ -48,8 +48,15 @@ export function setTaskSound(choice: TaskSoundChoice, storage?: Pick<Storage, "s
 
 function shouldPlayCompletionSound(event: AgentEvent, agents: NotificationAgent[]): boolean {
   // A quiet routine run posted nothing, so it has no reply to announce. A turn that continues its
-  // plan is not the end of the request.
-  if (event.type !== "turn-completed" || event.status !== "completed" || event.quiet || event.continues) return false;
+  // plan is not the end of the request. An answer to another agent goes to that agent.
+  if (
+    event.type !== "turn-completed" ||
+    event.status !== "completed" ||
+    event.quiet ||
+    event.continues ||
+    event.answersAgent
+  )
+    return false;
   return agents.some((agent) => agent.id === event.agentId && agent.notifications);
 }
 
