@@ -1226,6 +1226,7 @@ export class TurnLifecycle {
         origin: deliveries[0]?.delivery.sender.kind ?? "unknown",
         ...(quiet ? { quiet: true as const } : {}),
         ...(continuation ? { continues: true as const } : {}),
+        ...(answersAgent(deliveries) ? { answersAgent: true as const } : {}),
       });
       if (!channelTurn && !routineSession) {
         // An automatic continuation is part of the turn that the person started, so it counts once.
@@ -1659,6 +1660,18 @@ export class TurnLifecycle {
       detail: text,
     });
   }
+}
+
+/**
+ * Whether each message of the turn is a request from another agent that waits for an answer, so the
+ * result goes back to that agent (`#relayAgentResult`, or the agent's own reply). A message from the
+ * user or a routine, an answer, and information are not.
+ */
+function answersAgent(deliveries: readonly DeliveryContext[]): boolean {
+  return (
+    deliveries.length > 0 &&
+    deliveries.every(({ delivery }) => delivery.sender.kind === "agent" && delivery.expectsReply !== false)
+  );
 }
 
 /**

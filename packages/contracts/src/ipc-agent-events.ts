@@ -121,6 +121,13 @@ export type AgentEvent =
        * not read aloud. Only local listeners receive it; the Team API adapters leave it out.
        */
       continues?: true;
+      /**
+       * Each message of the turn is a request from another agent that waits for an answer, so the
+       * result goes back to that agent, not to the user. When it completes, it shows no notification
+       * and plays no sound; the requester's answer with the result does. A failed turn still
+       * notifies. Only local listeners receive it; the Team API adapters leave it out.
+       */
+      answersAgent?: true;
     }
   | {
       type: "prompt";
@@ -283,7 +290,8 @@ export function isAgentEvent(value: unknown): value is AgentEvent {
         isString(value.turnId) &&
         (value.origin === undefined || isAgentTurnOrigin(value.origin)) &&
         (value.quiet === undefined || value.quiet === true) &&
-        (value.continues === undefined || value.continues === true)
+        (value.continues === undefined || value.continues === true) &&
+        (value.answersAgent === undefined || value.answersAgent === true)
       );
     case "prompt":
       return (
