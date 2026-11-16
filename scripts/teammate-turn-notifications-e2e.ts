@@ -22,10 +22,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { AGENT_PROVIDERS, type AgentEvent, LOCAL_SERVER_ID } from "@openbot/contracts/ipc";
 import { createFormat, translateFor } from "@openbot/i18n";
+import { encodeLiveActivityBytes } from "@openbot/team-client/live-activity-seal";
+import { pushNotificationKeys } from "@openbot/team-client/push-notification-seal";
 import { plugin } from "bun";
 import { Effect } from "effect";
+import { openSealedLiveActivity } from "../apps/mobile/src/features/live-activity/model/live-activity-open";
 import type { AgentBrowserHost } from "../src/backend/agent/turn-lifecycle";
-import type { NotificationRelayRequest } from "../src/main/push-notifications";
 
 const OUT = resolve(import.meta.dirname, "../.openbot-build/teammate-turn-notifications-e2e");
 const root = await mkdtemp(join(tmpdir(), "openbot-teammate-turn-notifications-"));
@@ -288,8 +290,11 @@ const manager = new RemoteServerManager(
 const events: AgentEvent[] = [];
 /** The agent events that the phone service reads, as the host's agent service sends them. */
 const hostEvents = new EventEmitter<{ event: [AgentEvent] }>();
-const sent: NotificationRelayRequest[] = [];
-const sentWaiters: (() => void)[] = [];
+const phoneSecret = crypto.getRandomValues(new Uint8Array(32));
+const phoneKeys = pushNotificationKeys(phoneSecret);
+/** The notifications that the phone got, opened as the app opens them, in order. */
+const phoneShown: { title: string; body: string }[] = [];
+const phoneWaiters: (() => void)[] = [];
 const phone = new PushNotificationService({
   agents: {
     on: (_name, listener) => hostEvents.on("event", listener),
@@ -306,8 +311,15 @@ const phone = new PushNotificationService({
   store: { list: () => [], replace: () => Effect.void },
   send: (request) =>
     Effect.sync(() => {
-      sent.push(request);
-      for (const resolve of sentWaiters.splice(0)) resolve();
+      const text = openSealedLiveActivity(
+        request.push.sealed,
+        encodeLiveActivityBytes(phoneKeys.seal),
+        encodeLiveActivityBytes(phoneKeys.tag),
+      );
+      assert.ok(text, "The phone cannot open the send.");
+      const { title, body } = JSON.parse(text);
+      phoneShown.push({ title, body });
+      for (const resolve of phoneWaiters.splice(0)) resolve();
       return "sent" as const;
     }),
   hiddenAgentIds: () => new Set(),
@@ -390,33 +402,35 @@ const completions = (agentId: string, from: number) =>
         event.type === "turn-completed" && event.agentId === agentId,
     );
 
-let barrierId = 0;
-let barrierSends = 0;
+const BARRIER = "Barrier";
+let barriers = 0;
 /**
- * Waits until the phone service has decided each event before now: it then sends one request that
- * always reaches the phone. Answers the sends before it, without the barriers.
+ * Waits until the phone service has sent its notification of a request of the barrier agent, which
+ * always reaches the phone. The service decides the events in order, so each event before it was
+ * decided. A send that comes later shows in the next list with its own title, and fails that check.
  */
-async function phoneSends(agentId: string): Promise<number> {
-  const delivered = new Promise<void>((done) => sentWaiters.push(done));
+async function phoneBarrier(agentId: string): Promise<void> {
+  const count = ++barriers;
+  const sent = () => phoneShown.filter((notice) => notice.title === BARRIER).length >= count;
   hostEvents.emit("event", {
     type: "browser-takeover-requested",
-    request: { requestId: `barrier-${++barrierId}`, agentId, threadId: "barrier", turnId: "barrier", tabId: "tab" },
+    request: { requestId: `barrier-${count}`, agentId, threadId: "barrier", turnId: "barrier", tabId: "tab" },
   });
-  await delivered;
-  barrierSends += 1;
-  return sent.length - barrierSends;
+  while (!sent()) await new Promise<void>((done) => phoneWaiters.push(done));
 }
 
-const mark = (barrierAgentId: string) =>
-  phoneSends(barrierAgentId).then((phoneCount) => ({
-    desktop: shown.length,
-    phone: phoneCount,
-    events: events.length,
-  }));
+async function mark(barrierAgentId: string) {
+  await phoneBarrier(barrierAgentId);
+  return { desktop: shown.length, phone: phoneShown.length, events: events.length };
+}
 
+/** The notifications of the desktop and the phone since `from`, without the barriers. */
 async function notificationsSince(from: { desktop: number; phone: number }, barrierAgentId: string) {
-  const phoneCount = await phoneSends(barrierAgentId);
-  return { desktop: shown.slice(from.desktop), phone: phoneCount - from.phone };
+  await phoneBarrier(barrierAgentId);
+  return {
+    desktop: shown.slice(from.desktop),
+    phone: phoneShown.slice(from.phone).filter((notice) => notice.title !== BARRIER),
+  };
 }
 
 const finished = english("notification.finished");
@@ -434,7 +448,7 @@ try {
       value: {
         serverId: "phone-server-id",
         token: "e2e-token-".padEnd(40, "x"),
-        secret: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url"),
+        secret: Buffer.from(phoneSecret).toString("base64url"),
         locale: "en",
         away: true,
         level: "all",
@@ -445,6 +459,7 @@ try {
     },
   );
 
+  const barrier = await createAgent(BARRIER);
   const coordinator = await createAgent("Coordinator");
   const teammates: Awaited<ReturnType<typeof createAgent>>[] = [];
   for (const name of ["Porygon", "Machamp", "Hoothoot", "Dedenne", "Meowth", "Vespiquen"])
@@ -473,7 +488,7 @@ try {
     await waitFor("the end of the coordinator's own turn", () =>
       completions(coordinator.id, start).some((event) => event.origin === "user"),
     );
-    const from = await mark(coordinator.id);
+    const from = await mark(barrier.id);
     openGate("reports");
     const summary = await waitFor("the coordinator's answer with the reports", () =>
       completions(coordinator.id, from.events).find(
@@ -496,26 +511,27 @@ try {
       new Set(teammates.map((agent) => agent.id)),
       "The coordinator's answer turn took each teammate's result.",
     );
-    const seen = await notificationsSince(from, coordinator.id);
-    assert.deepEqual(seen, { desktop: [{ title: coordinator.name, body: finished }], phone: 1 });
+    const seen = await notificationsSince(from, barrier.id);
+    const once = [{ title: coordinator.name, body: finished }];
+    assert.deepEqual(seen, { desktop: once, phone: once });
     return seen;
   });
 
   const teammate = teammates[0];
   assert.ok(teammate);
   await check("a message from the user to a teammate notifies", async () => {
-    const from = await mark(coordinator.id);
+    const from = await mark(barrier.id);
     assert.equal(await settled(await send(teammate.id, "How is the disk?")), "completed");
-    const seen = await notificationsSince(from, coordinator.id);
-    assert.deepEqual(seen.desktop, [{ title: teammate.name, body: finished }]);
-    assert.equal(seen.phone, 1);
+    const seen = await notificationsSince(from, barrier.id);
+    const expected = [{ title: teammate.name, body: finished }];
+    assert.deepEqual(seen, { desktop: expected, phone: expected });
     return seen;
   });
 
   await check("a question and an approval in a teammate's turn for the coordinator notify", async () => {
     const [asker, approver] = teammates.slice(1, 3);
     assert.ok(asker && approver);
-    const from = await mark(coordinator.id);
+    const from = await mark(barrier.id);
     const request = await send(
       coordinator.id,
       `Ask two teammates. ${plan({
@@ -555,7 +571,7 @@ try {
       ),
     );
     await waitFor("every agent to be idle", () => [coordinator, asker, approver].every((agent) => idle(agent.id)));
-    const seen = await notificationsSince(from, coordinator.id);
+    const seen = await notificationsSince(from, barrier.id);
     // Each request is its own message, so each answer can start its own turn of the coordinator.
     const coordinatorTurns = completions(coordinator.id, from.events).filter((event) => event.status === "completed");
     assert.ok(coordinatorTurns.length >= 2, "The coordinator answered with the results.");
@@ -567,7 +583,7 @@ try {
     const order = (list: { title: string; body: string }[]) =>
       list.map((entry) => `${entry.title}: ${entry.body}`).sort();
     assert.deepEqual(order(seen.desktop), order(expected));
-    assert.equal(seen.phone, expected.length);
+    assert.deepEqual(order(seen.phone), order(expected));
     return seen;
   });
 
@@ -596,7 +612,7 @@ try {
       },
       { recordConversationEvent: false },
     );
-    const from = await mark(coordinator.id);
+    const from = await mark(barrier.id);
     await runCauseEffect(service.testRoutine({ agentId: coordinator.id, routineId: routine.id }));
     await waitFor("the routine run", () =>
       completions(coordinator.id, from.events).some((event) => event.origin === "routine"),
@@ -609,12 +625,12 @@ try {
     );
     await waitFor("every agent to be idle", () => [coordinator, helper].every((agent) => idle(agent.id)));
     assert.equal(completions(helper.id, from.events).length, 1, "The teammate ran its report turn.");
-    const seen = await notificationsSince(from, coordinator.id);
-    assert.deepEqual(seen.desktop, [
+    const seen = await notificationsSince(from, barrier.id);
+    const expected = [
       { title: coordinator.name, body: finished },
       { title: coordinator.name, body: finished },
-    ]);
-    assert.equal(seen.phone, 2);
+    ];
+    assert.deepEqual(seen, { desktop: expected, phone: expected });
     return seen;
   });
 
