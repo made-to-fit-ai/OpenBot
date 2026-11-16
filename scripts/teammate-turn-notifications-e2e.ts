@@ -403,20 +403,22 @@ const completions = (agentId: string, from: number) =>
     );
 
 const BARRIER = "Barrier";
+/** A barrier request on the phone. The barrier agent's own first turn is not one. */
+const isBarrier = (notice: { title: string; body: string }) =>
+  notice.title === BARRIER && notice.body === english("notification.needsBrowserStep");
 let barriers = 0;
 /**
- * Waits until the phone service has sent its notification of a request of the barrier agent, which
- * always reaches the phone. The service decides the events in order, so each event before it was
- * decided. A send that comes later shows in the next list with its own title, and fails that check.
+ * Waits until the phone service has sent its notification of a new request of the barrier agent,
+ * which always reaches the phone. The service decides the events in order, so each event before it
+ * was decided. A send that comes later shows in the next list with its own title, and fails that check.
  */
 async function phoneBarrier(agentId: string): Promise<void> {
-  const count = ++barriers;
-  const sent = () => phoneShown.filter((notice) => notice.title === BARRIER).length >= count;
+  const before = phoneShown.filter(isBarrier).length;
   hostEvents.emit("event", {
     type: "browser-takeover-requested",
-    request: { requestId: `barrier-${count}`, agentId, threadId: "barrier", turnId: "barrier", tabId: "tab" },
+    request: { requestId: `barrier-${++barriers}`, agentId, threadId: "barrier", turnId: "barrier", tabId: "tab" },
   });
-  while (!sent()) await new Promise<void>((done) => phoneWaiters.push(done));
+  while (phoneShown.filter(isBarrier).length <= before) await new Promise<void>((done) => phoneWaiters.push(done));
 }
 
 async function mark(barrierAgentId: string) {
@@ -429,7 +431,7 @@ async function notificationsSince(from: { desktop: number; phone: number }, barr
   await phoneBarrier(barrierAgentId);
   return {
     desktop: shown.slice(from.desktop),
-    phone: phoneShown.slice(from.phone).filter((notice) => notice.title !== BARRIER),
+    phone: phoneShown.slice(from.phone).filter((notice) => !isBarrier(notice)),
   };
 }
 
